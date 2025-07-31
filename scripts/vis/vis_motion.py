@@ -44,19 +44,19 @@ class AssetDesc:
         self.flip_visual_attachments = flip_visual_attachments
 
 
-h1_xml = "resources/robots/h1/h1.xml"
-h1_urdf = "resources/robots/h1/urdf/h1.urdf"
+new_robot_xml = "resources/robots/h1_2/h1_2.xml"
+new_robot_urdf = "resources/robots/h1_2/urdf/h1_2.urdf"
 asset_descriptors = [
     # AssetDesc(h1_xml, False),
-    AssetDesc(h1_urdf, False),
+    AssetDesc(new_robot_urdf, False),
 ]
-sk_tree = SkeletonTree.from_mjcf(h1_xml)
+sk_tree = SkeletonTree.from_mjcf(new_robot_xml)
 
-motion_file = "data/h1/test.pkl"
+motion_file = "data/new_robot/amass_all.pkl"
 if os.path.exists(motion_file):
     print(f"loading {motion_file}")
 else:
-    raise ValueError(f"Motion file {motion_file} does not exist! Please run grad_fit_h1.py first.")
+    raise ValueError(f"Motion file {motion_file} does not exist! Please run grad_fit_new_robot.py first.")
 
 # parse arguments
 args = gymutil.parse_arguments(description="Joint monkey: Animate degree-of-freedom ranges",
@@ -173,7 +173,7 @@ gym.prepare_sim(sim)
 
 device = (torch.device("cuda", index=0) if torch.cuda.is_available() else torch.device("cpu"))
 
-motion_lib = MotionLibH1(motion_file=motion_file, device=device, masterfoot_conifg=None, fix_height=False, multi_thread=False, mjcf_file=h1_xml)
+motion_lib = MotionLibH1(motion_file=motion_file, device=device, masterfoot_conifg=None, fix_height=False, multi_thread=False, mjcf_file=new_robot_xml)
 num_motions = 1
 curr_start = 0
 motion_lib.load_motions(skeleton_trees=[sk_tree] * num_motions, gender_betas=[torch.zeros(17)] * num_motions, limb_weights=[np.zeros(10)] * num_motions, random_sample=False)
@@ -198,7 +198,20 @@ gym.subscribe_viewer_keyboard_event(viewer, gymapi.KEY_T, "next_batch")
 motion_id = 0
 motion_acc = set()
 
+###########################
+recording = False
+recorded = False
+hand_elbow_recording = []
+LEFT_HAND_NAME = "left_wrist_pitch_link"
+RIGHT_HAND_NAME = "right_wrist_pitch_link"
+LEFT_ELBOW_NAME = "left_elbow_pitch_link"
+RIGHT_ELBOW_NAME = "right_elbow_pitch_link"
 
+LEFT_HAND_IDX = sk_tree._node_names.index(LEFT_HAND_NAME)
+RIGHT_HAND_IDX = sk_tree._node_names.index(RIGHT_HAND_NAME)
+LEFT_ELBOW_IDX = sk_tree._node_names.index(LEFT_ELBOW_NAME)
+RIGHT_ELBOW_IDX = sk_tree._node_names.index(RIGHT_ELBOW_NAME)
+###########################
 
 
 env_ids = torch.arange(num_envs).int().to(args.sim_device)
@@ -215,15 +228,11 @@ num_spheres = 19
 init_positions = gymapi.Vec3(0.0, 0.0, 0.0)
 spacing = 0.
 
-
-
-
-
 while not gym.query_viewer_has_closed(viewer):
     # step the physics
-
     motion_len = motion_lib.get_motion_length(motion_id).item()
     motion_time = time_step % motion_len
+    
     # motion_time = 0
     # import pdb; pdb.set_trace()
     # print(motion_id, motion_time)
@@ -237,6 +246,39 @@ while not gym.query_viewer_has_closed(viewer):
         
     gym.clear_lines(viewer)
     gym.refresh_rigid_body_state_tensor(sim)
+    ############################################
+    # ✅ 记录第一个motion的左右TCP和肘位置和旋转
+    if motion_keys[motion_id] == "0" and not recorded:
+        if not recording:
+            print("📌 开始记录 0 号动作的左右TCP和肘部轨迹...")
+            recording = True
+        left_tcp_pos = rb_pos[0, LEFT_HAND_IDX].detach().cpu().numpy()
+        right_tcp_pos = rb_pos[0, RIGHT_HAND_IDX].detach().cpu().numpy()
+        left_elbow_pos = rb_pos[0, LEFT_ELBOW_IDX].detach().cpu().numpy()
+        right_elbow_pos = rb_pos[0, RIGHT_ELBOW_IDX].detach().cpu().numpy()
+        left_tcp_rot = rb_rot[0, LEFT_HAND_IDX].detach().cpu().numpy()
+        right_tcp_rot = rb_rot[0, RIGHT_HAND_IDX].detach().cpu().numpy()
+        left_elbow_rot = rb_rot[0, LEFT_ELBOW_IDX].detach().cpu().numpy()
+        right_elbow_rot = rb_rot[0, RIGHT_ELBOW_IDX].detach().cpu().numpy()
+        hand_elbow_recording.append({
+            "frame": int(time_step / dt),
+            "left_hand": left_tcp_pos,
+            "right_hand": right_tcp_pos,
+            "left_elbow": left_elbow_pos,
+            "right_elbow": right_elbow_pos,
+            "left_hand_rot": left_tcp_rot,
+            "right_hand_rot": right_tcp_rot,
+            "left_elbow_rot": left_elbow_rot,
+            "right_elbow_rot": right_elbow_rot
+        })
+
+        # 判断是否记录完毕（当前帧为最后一帧）
+        if int(time_step + dt) >= motion_len:
+            save_path = "gym_hand_elbow_trajectory_test.pkl"
+            joblib.dump(hand_elbow_recording, save_path)
+            print(f"💾 记录完成，已保存左右TCP和肘部轨迹数据到 {save_path}")
+            recorded = True
+    ############################################
     # import pdb; pdb.set_trace()
     idx = 0
     for pos_joint in rb_pos[0, 1:]: # idx 0 torso (duplicate with 11)
@@ -345,6 +387,15 @@ while not gym.query_viewer_has_closed(viewer):
             print(f"Next batch {curr_start}")
 
         time_step = 0
+############################################
+# ✅ 保存所有手部肘部数据
+if len(hand_elbow_recording) > 0:
+    import joblib
+    save_path = "gym_all_elbow_trajectory_test.pkl"
+    joblib.dump(hand_elbow_recording, save_path)
+    print(f"💾 成功保存全部左右肘部轨迹数据到 {save_path}")
+############################################
+
 print("Done")
 
 gym.destroy_viewer(viewer)
